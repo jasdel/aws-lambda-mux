@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 )
@@ -15,11 +16,17 @@ type APIGatewayProxy struct {
 	Handler ResourceHandler
 }
 
+// APIGatewayProxyRequest provides a proxy request wrapper for deserializing
+// the events.APIGatewayProxyRequest with Go's http.Header formated headers.
+// Simplifies the conversion between Go's http.Header and lambda's events multi
+// value header parameter.
 type APIGatewayProxyRequest struct {
 	events.APIGatewayProxyRequest
 	HTTPHeader http.Header `json:"-"`
 }
 
+// UnmarshalJSON unmarshals APIGatewayProxyRequest with the MultiValueHeaders
+// deserialized as Go http.Header.
 func (r *APIGatewayProxyRequest) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &r.APIGatewayProxyRequest); err != nil {
 		return err
@@ -35,18 +42,26 @@ func (r *APIGatewayProxyRequest) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// APIGatewayProxyResponse serializes the events.APIGatewayResponse with Go's
+// http.Header serialized as a MultiValueHeaders. Simplifies the conversion
+// between Go's http.Header and lambda's events multi value header parameter.
 type APIGatewayProxyResponse struct {
 	events.APIGatewayProxyResponse
 	HTTPHeader http.Header `json:"-"`
 }
 
+// MarshalJSON marshals the response as an JSON document.
 func (r APIGatewayProxyResponse) MarshalJSON() ([]byte, error) {
 	r.MultiValueHeaders = map[string][]string(r.HTTPHeader)
 
 	return json.Marshal(r.APIGatewayProxyResponse)
 }
 
-// Invoke invokes the API Gateway API call.
+// Invoke invokes the API Gateway API call. Implements lambda's Handler
+// interface.
+//
+// Deserializes the request as an APIGatewayProxyRequest, and serializes the
+// response as a APIGatewayProxyResponse.
 func (p APIGatewayProxy) Invoke(ctx context.Context, payload []byte) ([]byte, error) {
 	var req APIGatewayProxyRequest
 
@@ -68,23 +83,28 @@ func (p APIGatewayProxy) Invoke(ctx context.Context, payload []byte) ([]byte, er
 }
 
 // ResourceHandler is the interface for APIGatewayProxy Lambda resource
-// handlers.
+// handlers for implementations to provide resource handlers.
 type ResourceHandler interface {
 	ServeResource(context.Context, APIGatewayProxyRequest) (APIGatewayProxyResponse, error)
 }
 
-// ServeResource is an API Gateway Proxy Lambda multiplexer. Matches resources
-// by exact name.
+// ServeResource is an API Gateway Proxy Lambda resource handler that matches
+// API Gateway request resources by exact name. Delegates to the resource
+// handler by name.
+//
+// Resource name must match exactly, including path parameters.
 type ServeResource struct {
 	resources map[string]ResourceHandler
 }
 
-// NewServeResource returns a ServeResource API Gateway resource.
+// NewServeResource initializes and returns a ServeResource that resource
+// handlers can be added to via the Handle method.
 func NewServeResource() *ServeResource {
 	return &ServeResource{resources: map[string]ResourceHandler{}}
 }
 
-// ServeResource invokes the handler for the resource API Gateway resource.
+// ServeResource implements the ResourceHandler interface, and delegates the
+// requests to the registered handler. If no handler is found returns an error.
 func (s *ServeResource) ServeResource(
 	ctx context.Context, req APIGatewayProxyRequest,
 ) (resp APIGatewayProxyResponse, err error) {
@@ -95,24 +115,26 @@ func (s *ServeResource) ServeResource(
 	return h.ServeResource(ctx, req)
 }
 
-// Handle adds a new resource handler.
+// Handle adds a new resource handler for the resource.
 func (s *ServeResource) Handle(resource string, handler ResourceHandler) *ServeResource {
 	s.resources[resource] = handler
 	return s
 }
 
-// ServeMethod is an API Gateway Proxy Lambda multiplexer for request HTTP
-// methods. Matches resources by exact name.
+// ServeMethod is an API Gateway Proxy resource handler delegating resource
+// requests to resource handlers filtered by HTTP request method.
 type ServeMethod struct {
 	methods map[string]ResourceHandler
 }
 
-// NewServeMethod returns a ServeMethod, HTTP methods can be added.
+// NewServeMethod initializes and returns a ServeMethod that HTTP methods can
+// be added to via the Handle method.
 func NewServeMethod() *ServeMethod {
 	return &ServeMethod{methods: map[string]ResourceHandler{}}
 }
 
-// ServeResource invokes the handler for the resource HTTP method.
+// ServeResource implements the ResourceHandler interface, delegating resource
+// requests to the ResourceHandler associated with the HTTP request method.
 func (s *ServeMethod) ServeResource(
 	ctx context.Context, req APIGatewayProxyRequest,
 ) (resp APIGatewayProxyResponse, err error) {
@@ -123,18 +145,23 @@ func (s *ServeMethod) ServeResource(
 	return h.ServeResource(ctx, req)
 }
 
-// Handle adds a new HTTP method handler.
+// Handle adds a new ResourceHandler associated with a HTTP request method.
+// Replaces existing methods that match.
+//
+// HTTP request methods are not case sensitive.
 func (s *ServeMethod) Handle(method string, handler ResourceHandler) *ServeMethod {
-	s.methods[method] = handler
+	s.methods[strings.ToUpper(method)] = handler
 
 	return s
 }
 
-// ResourceHandlerFunc provides wrapping of a handler function as the
-// ResourceHandler type.
-type ResourceHandlerFunc func(context.Context, APIGatewayProxyRequest) (resp APIGatewayProxyResponse, err error)
+// ResourceHandlerFunc provides wrapping of a function as the ResourceHandler.
+type ResourceHandlerFunc func(context.Context, APIGatewayProxyRequest) (
+	resp APIGatewayProxyResponse, err error,
+)
 
-// ServeResource invokes the handler for resource handler function.
+// ServeResource implements the ResourceHandler interface and delegates to the
+// function to handle the resource.
 func (f ResourceHandlerFunc) ServeResource(
 	ctx context.Context, req APIGatewayProxyRequest,
 ) (resp APIGatewayProxyResponse, err error) {
